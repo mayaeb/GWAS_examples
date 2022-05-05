@@ -1,0 +1,121 @@
+---
+title: "statgenGWAS"
+author: "Maya Emmons-Bell"
+date: "5/5/2022"
+output: html_document
+---
+
+Worked example from statgenGWAS vignette.
+
+statgenGWAS:
+- for empty model (no SNP in fixed effects), estimate variance components in the phenotype variance/covariance matrix, using either EMMA algorithm
+or NR algorithm.
+- use this variance/covariance matrix estimate, test null hypothesis Bsnp = 0 for each SNP. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load libraries
+```{r}
+library(statgenGWAS)
+library(tidyverse)
+```
+
+
+create gData object, which consists of:
+- marker map 
+- marker matrix
+- phenotypic data 
+- kinship matrix 
+- other covariates 
+```{r}
+#using maize data from EU project DROPS, available in statgenGWAS package
+data("dropsMarkers")
+data("dropsMap")
+data("dropsPheno")
+
+#create gData object
+#markers need to be either matrix of df
+
+#add genotypes as rownames of markers data, drop Ind column
+rownames(dropsMarkers) <- dropsMarkers[["Ind"]]
+dropsMarkers <- select(dropsMarkers, -Ind)
+head(dropsMarkers, 5)
+
+#map object should have columns "chr" and "pos", and row names should be SNPs
+rownames(dropsMap) <- dropsMap[["SNP.names"]]
+colnames(dropsMap)[match(c("Chromosome", "Position"), colnames(dropsMap))] <- c("chr", "pos")
+
+#create gData object
+gData <- createGData(geno = dropsMarkers, map = dropsMap)
+
+
+#add phenotype data to the gData object 
+#genotypic means for 28 trials are in dropsPheno object, adding them as a list of 28 dfs. 
+#data frames need "genotype" as first column, then only traits after that - all other columns dropped
+
+#rename variety_ID to genotype 
+colnames(dropsPheno)[colnames(dropsPheno) == "Variety_ID"] <- "genotype"
+head(dropsPheno)
+dropsPhenoList <- split(x = dropsPheno[c("genotype", "grain.yield",
+                                         "grain.number", "seed.size",
+                                         "anthesis", "silking", "plant.height",
+                                         "tassel.height", "ear.height")], 
+                        f = dropsPheno[["Experiment"]])
+## Add phenotypic data to gDataDrops.
+gData <- createGData(gData = gData, pheno = dropsPhenoList)
+summary(gData, trials = "Mur13W")
+
+#plot genetic map 
+plot(gData)
+#can highlight positions using "highlight" in plot function, i.e. 
+plot(gData, highlight = dropsMap[20000, ])
+```
+
+
+cleaning markers - markers need to be in 0/1/2 format, using codeMarkers(). can also be used to remove duplicate SNPS, etc 
+```{r}
+#this data has already been converted to 0/1/2 format
+#removing duplicate SNPs
+#markers are removed at random, so if you want reproducible removal, set seed. 
+gData_nodups <- codeMarkers(gData, impute = FALSE, verbose = TRUE) 
+
+#can also use this function to impute data if there are lots of missing values 
+```
+run single-trait GWAS 
+```{r}
+## run single trait GWAS for traits 'grain.yield' and 'anthesis' for trial Mur13W.
+GWASDrops <- runSingleTraitGwas(gData = gData_nodups,
+                                trials = "Mur13W",
+                                traits = c("grain.yield", "anthesis"))
+
+
+#take a look at results 
+print(head(GWASDrops$GWAResult$Mur13W), row.names = FALSE)
+#direction effect is determined by the coding markers -- here minor allele was coded as reference 
+
+#take a look at signSnp, a list of data tables for each trait, containing significant SNPs
+print(GWASDrops$signSnp$Mur13W, row.names = FALSE)
+
+#take a look at summary 
+summary(GWASDrops)
+
+```
+
+visualization
+```{r}
+## Plot a QQ-plot of GWAS Drops.
+plot(GWASDrops, plotType = "qq", trait = "grain.yield")
+## Plot a manhattan plot of GWAS Drops.
+plot(GWASDrops, plotType = "manhattan", trait = "grain.yield")
+
+#code for manipulating plotting
+## Set significance threshold to 4 and only plot chromosomes 6 to 8.
+plot(GWASDrops, plotType = "manhattan", trait = "grain.yield", yThr = 4, chr = 6:8)
+
+## Plot a qtl plot of GWAS Drops for Mur13W.
+plot(GWASDrops, plotType = "qtl")
+
+```
+

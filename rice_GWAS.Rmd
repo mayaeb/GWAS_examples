@@ -1,0 +1,224 @@
+---
+title: "rice_GWAS"
+author: "Maya Emmons-Bell"
+date: "5/5/2022"
+output: html_document
+---
+
+Practice GWAS analysis using vignette and toy data from: https://whussain2.github.io/Materials/Teaching/GWAS_R_2.html
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load libraries
+```{r}
+library(BGLR)
+library(tidyverse)
+library(SNPRelate)
+```
+
+
+load marker data sets 
+```{r}
+#marker allele data - coded such that 0 = homo for major allele, 1 = heterozygous, 2 = missing data, 3 = homo for minor allele 
+geno <- read_ped("RiceDiversity_44K_Genotypes_PLINK/sativas413.ped")
+dim(geno)
+
+#remove components of list 
+p = geno$p
+n = geno$n
+geno = geno$x
+
+#load accession information 
+fam <- read.table("RiceDiversity_44K_Genotypes_PLINK/sativas413.fam")
+head(fam)
+
+#load map information 
+map <- read.table("RiceDiversity_44K_Genotypes_PLINK/sativas413.map")
+head(map)
+
+#recode the marker data 
+geno[geno == 0] <- 0
+geno[geno == 1] <- 1
+geno[geno == 2] <- NA
+geno[geno == 3] <- 2
+
+#convert marker data to matrix, transpose 
+geno <- matrix(geno, nrow = p, ncol = n, byrow = TRUE) %>% t()
+dim(geno)
+
+```
+
+load phenotypic data 
+```{r}
+pheno <- read.table("http://www.ricediversity.org/data/sets/44kgwas/RiceDiversity_44K_Phenotypes_34traits_PLINK.txt", 
+    header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+head(pheno, 5)
+dim(pheno)
+
+#assign id information as rownames of geno file, make sure it matches with pheno data 
+head(fam, 5)
+rownames(geno) <- fam$V2
+table(rownames(geno) == pheno$NSFTVID)
+```
+
+creating object y - the first trait
+```{r}
+#extract first trait
+y <- matrix(pheno$Flowering.time.at.Arkansas)
+#add id info 
+rownames(y) <- pheno$NSFTVID
+
+#remove NA entries 
+index <- !is.na(y)
+y <- y[index, 1, drop = FALSE]
+dim(y)
+geno_temp <- geno[index, ]
+table(rownames(geno_temp) == rownames(y))
+
+```
+
+quality control 
+```{r}
+
+#impute marker data (replace missing values with mean)
+for(j in 1:ncol(geno)){
+  geno[,j] <- ifelse(is.na(geno[,j]), mean(geno[,j], na.rm = TRUE), geno[,j])
+}
+
+#check to make sure all NAs are removed 
+sum(is.na(geno))
+
+#filter out alleles with frequency less than 5% 
+p <- colSums(geno)/(2*nrow(geno))
+maf <- ifelse(p > 0.5, 1 - p, p)
+maf.index <- which(maf < 0.05)
+geno_filtered <- geno[, -maf.index]
+dim(geno_filtered)
+dim(geno)
+#filter out dropped markers in the map file as well, double check numbers match
+dim(map)
+map_filtered <- map[-maf.index, ]
+dim(map_filtered)
+
+```
+
+explore population structure to id associations that may need to be accounted for
+```{r}
+
+#create matrix with rows and column metadata information from map and fam files 
+geno_filtered <- as.matrix(geno_filtered)
+rownames(geno_filtered) <- fam$V2
+sample <- rownames(geno_filtered)
+length(sample)
+
+colnames(geno_filtered) <- map_filtered$V2
+snp_id <- colnames(geno_filtered)
+length(snp_id)
+```
+create gds file with marker and sample ids, save
+```{r}
+snpgdsCreateGeno("44k.gds", genmat = geno_filtered, sample.id = sample, snp.id = snp_id, 
+    snp.chromosome = map_filtered$V1, snp.position = map_filtered$V4, snpfirstdim = FALSE)
+# Now open the 44k.gds file
+geno_44k <- snpgdsOpen("44k.gds")
+snpgdsSummary("44k.gds")
+```
+
+perform pca, visualize
+```{r}
+#there's a pca function built into the SNPRelate package 
+
+pca <- snpgdsPCA(geno_44k, snp.id = colnames(geno_filtered))
+pca <- data.frame(sample.id = row.names(geno_filtered), EV1 = pca$eigenvect[, 1], EV2 = pca$eigenvect[, 
+    2], EV3 = pca$eigenvect[, 3], EV3 = pca$eigenvect[, 4], stringsAsFactors = FALSE)
+# Plot the PCA
+plot(pca$EV2, pca$EV1, xlab = "eigenvector 3", ylab = "eigenvector 4")
+
+#there's definitely structure here - adding population info to see it underlies this variation 
+pca_1 <- read.csv("http://ricediversity.org/data/sets/44kgwas/RiceDiversity.44K.germplasm.csv", 
+    header = TRUE, skip = 1, stringsAsFactors = FALSE)  
+pca_2 <- pca_1[match(pca$sample.id, pca_1$NSFTV.ID), ]
+table(pca_1$sample.id == pca_2$NSFTV.ID)
+
+# adding population information to pca file 
+pca_population <- cbind(pca_2$Sub.population, pca)
+colnames(pca_population)[1] <- "population"
+# plot w/ pop info
+plot(pca_population$EV1, pca_population$EV2, xlab = "PC1", ylab = "PC2", col = c(1:6)[factor(pca_population$population)])
+legend(x = "topright", legend = levels(factor(pca_population$population)), col = c(1:6), 
+    pch = 1, cex = 0.6)
+
+#so, variation is definitely explained by population structures, will need to take this into account  
+
+```
+
+run gwas using rrBLUP package 
+```{r}
+# create the geno file for rrBLUP  GWAS analysis
+geno_final <- data.frame(marker = MAP1[, 2], chrom = MAP1[, 1], pos = MAP1[, 
+    4], t(Geno1 - 1), check.names = FALSE)  # W = \in{-1, 0, 1}
+dim(Geno1)
+# create the pheno file
+pheno_final <- data.frame(NSFTV_ID = rownames(y), y = y)
+# Run the GWAS analysis
+GWAS <- GWAS(pheno_final, geno_final, min.MAF = 0.05, P3D = TRUE, plot = FALSE)
+```
+
+
+correct for multiple testing and visualize (from Li and Ji, 2005)
+```{r}
+# Read the genotypic file and create a matrix for each chromosome
+corr.matrix1 <- cor(geno_final[, 1:5888])
+corr.matrix2 <- cor(geno_final[, 5889:9439])
+corr.matrix3 <- cor(geno_final[, 9440:13464])
+corr.matrix4 <- cor(geno_final[, 13465:16091])
+corr.matrix5 <- cor(geno_final[, 16092:18701])
+corr.matrix6 <- cor(geno_final[, 18702:21660])
+corr.matrix7 <- cor(geno_final[, 21661:23587])
+corr.matrix8 <- cor(geno_final[, 23588:25668])
+corr.matrix9 <- cor(geno_final[, 25669:27501])
+corr.matrix10 <- cor(geno_final[, 27502:29121])
+corr.matrix11 <- cor(geno_final[, 29122:31752])
+corr.matrix12 <- cor(geno_final[, 31753:33719])
+# Now use the meff function from pacakge to get effective number of tests
+# for each chromosome
+meff_liji_1 <- meff(corr.matrix1, method = "liji")
+meff_liji_2 <- meff(corr.matrix2, method = "liji")
+meff_liji_3 <- meff(corr.matrix3, method = "liji")
+meff_liji_4 <- meff(corr.matrix4, method = "liji")
+meff_liji_5 <- meff(corr.matrix5, method = "liji")
+meff_liji_6 <- meff(corr.matrix6, method = "liji")
+meff_liji_7 <- meff(corr.matrix7, method = "liji")
+meff_liji_8 <- meff(corr.matrix8, method = "liji")
+meff_liji_9 <- meff(corr.matrix9, method = "liji")
+meff_liji_10 <- meff(corr.matrix10, method = "liji")
+meff_liji_11 <- meff(corr.matrix11, method = "liji")
+meff_liji_12 <- meff(corr.matrix12, method = "liji")
+
+# Now sum up all the effective tests to get effective number of independent
+# tests
+Meff <- sum(meff_liji_1, meff_liji_2, meff_liji_3, meff_liji_4, meff_liji_5, 
+    meff_liji_6, meff_liji_7, meff_liji_8, meff_liji_9, meff_liji_10, meff_liji_11, 
+    meff_liji_12)
+
+#determine sig 
+Meff = 3948
+p_threshold = (1 - (1 - 0.05))^1/3948
+p_threshold
+[1] 1.266464e-05
+
+#extract significant SNPs
+GWAS_sig <- GWAS %>% filter(y != "0")
+# List of significant SNPs
+GWAS_sig %>% filter(y < 1e-04)
+
+#plot 
+manhattan(x = GWAS_sig, chr = "chrom", bp = "pos", p = "y", snp = "marker", col = c("blue4", 
+    "orange3"), suggestiveline = -log10(1e-04), logp = TRUE)
+
+```
+
+
